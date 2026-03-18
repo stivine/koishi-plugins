@@ -1,0 +1,32 @@
+{
+  "name": "koishi-plugin-aqi",
+  "description": "AQI空气质量订阅插件，每日推送空气质量预报",
+  "version": "1.0.0",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin",
+    "aqi",
+    "air quality"
+  ],
+  "koishi": {
+    "description": {
+      "zh": "AQI空气质量订阅，每天9点推送空气质量预报，超过阈值时发出警告"
+    }
+  },
+  "peerDependencies": {
+    "koishi": "^4.16.6"
+  },
+  "dependencies": {
+    "axios": "^1.7.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
