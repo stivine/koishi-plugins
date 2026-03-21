@@ -234,8 +234,8 @@ async function llmPolish(raw: string, llm: LlmConfig): Promise<string> {
           {
             role: 'system',
             content:
-              '你是毒舌但关心人的空气质量播报员。用简短口语把数据改写成播报，风格辛辣有趣，' +
-              '必要时加表情符号，绝不废话。所有城市写在一段话里，100字以内，不加markdown。',
+              '你是可爱二次元关心人的空气质量播报员。用简短口语把信息改写成播报，风格有趣，AQI核心数字要说出来，此外的建议信息你随意参考' +
+              '必要时加表情符号和颜文字。所有城市写在一段话里，200字以内，不加markdown。',
           },
           { role: 'user', content: raw },
         ],
