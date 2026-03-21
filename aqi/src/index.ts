@@ -65,7 +65,7 @@ export const Config: Schema<Config> = Schema.object({
     .description('每日推送时间（0-23）'),
   forward: Schema.boolean()
     .default(true)
-    .description('默认以转发聊天记录形式发送'),
+    .description('以转发聊天记录形式发送（开启后消息显示为卡片，关闭后为普通文本）'),
   llm: Schema.object({
     baseURL: Schema.string()
       .description('OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1'),
@@ -384,17 +384,14 @@ export function apply(ctx: Context, config: Config) {
   // aqi.push：立即触发聚合播报（测试定时推送用）
   guild
     .command('aqi.push', '立即触发当前频道的聚合播报')
-    .option('forward',   '-f  强制转发形式')
-    .option('noForward', '-F  强制普通消息')
-    .action(async ({ session, options }) => {
+    .action(async ({ session }) => {
       const platform = session.platform
       const channelId = session.channelId
       const [channelRow] = await ctx.database.get('channel', { platform, id: channelId }, ['aqiSubscriptions'])
       const subs: AqiSubscription[] = Array.isArray(channelRow?.aqiSubscriptions) ? channelRow.aqiSubscriptions : []
       if (!subs.length) return '当前频道没有订阅任何城市，无法推送。'
 
-      const useForward = options.forward ? true : options.noForward ? false : forwardDefault
-      await session.send('正在拉取数据，请稍候……')
+      // await session.send('正在拉取数据，请稍候……')
 
       const results = await Promise.all(
         subs.map(async sub => {
@@ -406,24 +403,20 @@ export function apply(ctx: Context, config: Config) {
       const entries = results.filter((r): r is { data: QAqiResponse; sub: AqiSubscription } => r !== null)
       if (!entries.length) return '所有城市数据均获取失败，请稍后再试。'
 
-      return buildBatchMessage(entries, useForward, llm)
+      return buildBatchMessage(entries, forwardDefault, llm)
     })
 
   // aqi：查询 / 订阅 / 管理
   guild
     .command('aqi [city]', '订阅/查询 AQI 空气质量')
     .channelFields(['aqiSubscriptions', 'id', 'platform'])
-    .option('list',      '-l              查看订阅列表')
-    .option('remove',    '-r              取消订阅')
-    .option('subscribe', '-s              订阅每日推送')
-    .option('forward',   '-f              强制转发形式')
-    .option('noForward', '-F              强制普通消息')
+    .option('list',      '-l  查看订阅列表')
+    .option('remove',    '-r  取消订阅')
+    .option('subscribe', '-s  订阅每日推送')
     .action(async ({ session, options }, city) => {
       const channel = session.channel
       if (!Array.isArray(channel.aqiSubscriptions)) channel.aqiSubscriptions = []
       const subs = channel.aqiSubscriptions
-
-      const useForward = options.forward ? true : options.noForward ? false : forwardDefault
 
       // 查看列表
       if (options.list) {
@@ -439,7 +432,6 @@ export function apply(ctx: Context, config: Config) {
         '  aqi <城市> -r    取消订阅',
         '  aqi -l           查看订阅列表',
         '  aqi.push         立即触发播报',
-        '选项：-f 转发形式  -F 普通消息',
       ].join('\n')
 
       // 取消订阅
@@ -453,7 +445,7 @@ export function apply(ctx: Context, config: Config) {
       }
 
       // 订阅 / 立即查询：都需要先地理编码
-      await session.send(`正在查询 "${city}"，请稍候……`)
+      // await session.send(`正在查询 "${city}"，请稍候……`)
       const geo = await geocode(client, jwtMgr, city)
       if (!geo) return `找不到城市"${city}"，请检查名称（支持中英文，如"苏州"或"suzhou"）。`
 
@@ -481,6 +473,6 @@ export function apply(ctx: Context, config: Config) {
         lat: geo.lat,
         lon: geo.lon,
       }
-      return buildMessage(data, { sub, forward: useForward, llm })
+      return buildMessage(data, { sub, forward: forwardDefault, llm })
     })
 }
