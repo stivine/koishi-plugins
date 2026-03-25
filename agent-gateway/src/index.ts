@@ -57,6 +57,8 @@ export interface Config {
   commandName: string
   commandBypassSilence: boolean
   passthroughMetadata: boolean
+  adminNotifyUserId?: string
+  adminNotifyPlatform?: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -72,6 +74,8 @@ export const Config: Schema<Config> = Schema.object({
   commandName: Schema.string().default('agent.chat').description('手动触发命令名。'),
   commandBypassSilence: Schema.boolean().default(true).description('手动命令是否绕过 Agent 的 stop 行为。'),
   passthroughMetadata: Schema.boolean().default(true).description('是否将 session 额外字段透传给 Agent。'),
+  adminNotifyUserId: Schema.string().description('可选：Agent 异常时通知的管理员用户 ID，不填则不通知。'),
+  adminNotifyPlatform: Schema.string().description('可选：管理员所在平台（如 onebot），不填则使用当前会话平台。'),
 })
 
 function normalizeText(input: string) {
@@ -145,22 +149,26 @@ function buildRequestBody(session: Session, text: string, traceId: string, confi
 function responseToMessages(data: AgentResponseBody, bypassStop = false) {
   if (Array.isArray(data.actions) && data.actions.length) {
     const messages: string[] = []
+    let stopped = false
     for (const action of data.actions) {
-      if (action.type === 'stop' && !bypassStop) return []
+      if (action.type === 'stop' && !bypassStop) {
+        stopped = true
+        return { messages: [], stopped }
+      }
       if (action.type === 'reply') {
         const msg = normalizeText(action.content)
         if (msg) messages.push(msg)
       }
     }
-    return messages
+    return { messages, stopped }
   }
 
   if (Array.isArray(data.segments) && data.segments.length) {
-    return data.segments.map(normalizeText).filter(Boolean)
+    return { messages: data.segments.map(normalizeText).filter(Boolean), stopped: false }
   }
 
   const single = normalizeText(data.reply || '')
-  return single ? [single] : []
+  return { messages: single ? [single] : [], stopped: false }
 }
 
 async function callAgent(ctx: Context, config: Config, body: AgentRequestBody) {
@@ -174,6 +182,28 @@ async function callAgent(ctx: Context, config: Config, body: AgentRequestBody) {
     timeout: config.timeout,
     headers,
   })
+}
+
+function toErrorMessage(error: unknown) {
+  const msg = (error as Error)?.message || String(error)
+  return normalizeText(msg).slice(0, 500)
+}
+
+async function notifyAdmin(ctx: Context, config: Config, session: Session, title: string, detail: string) {
+  const adminUserId = config.adminNotifyUserId?.trim()
+  if (!adminUserId) return
+  const platform = config.adminNotifyPlatform?.trim() || session.platform
+  const bot = ctx.bots.find((x) => x.platform === platform)
+  if (!bot || typeof (bot as any).sendPrivateMessage !== 'function') {
+    logger.warn(`admin notify skipped: no bot/sendPrivateMessage for platform=${platform}`)
+    return
+  }
+  const text = `[agent-gateway] ${title}\nplatform=${session.platform}\nchannel=${session.channelId || 'private'}\nuser=${session.userId || 'unknown'}\ndetail=${detail}`
+  try {
+    await (bot as any).sendPrivateMessage(adminUserId, text)
+  } catch (error) {
+    logger.warn(`admin notify failed: ${toErrorMessage(error)}`)
+  }
 }
 
 async function runGateway(
@@ -197,11 +227,20 @@ async function runGateway(
   try {
     data = await callAgent(ctx, config, body)
   } catch (error) {
-    logger.warn(`agent request failed: ${(error as Error).message || String(error)}`)
-    return []
+    const detail = `traceId=${traceId} reason=request_failed error=${toErrorMessage(error)}`
+    logger.warn(`agent request failed: ${detail}`)
+    await notifyAdmin(ctx, config, session, 'agent request failed', detail)
+    return { messages: [], stopped: false }
   }
 
-  return responseToMessages(data, bypassStop)
+  const parsed = responseToMessages(data, bypassStop)
+  if (!parsed.messages.length && !parsed.stopped) {
+    const raw = normalizeText(JSON.stringify(data)).slice(0, 700)
+    const detail = `traceId=${traceId} reason=empty_response body=${raw || '{}'}`.slice(0, 1000)
+    logger.warn(`agent returned no sendable content: ${detail}`)
+    await notifyAdmin(ctx, config, session, 'agent empty response', detail)
+  }
+  return parsed
 }
 
 export function apply(ctx: Context, config: Config) {
@@ -225,10 +264,10 @@ export function apply(ctx: Context, config: Config) {
     if (!text) return next()
     if (isLikelyCommand(text)) return next()
 
-    const messages = await runGateway(ctx, session, text, config, false, false, false)
-    if (!messages.length) return next()
+    const result = await runGateway(ctx, session, text, config, false, false, false)
+    if (!result.messages.length) return next()
 
-    for (const message of messages) {
+    for (const message of result.messages) {
       await session.send(message)
     }
   })
@@ -237,9 +276,9 @@ export function apply(ctx: Context, config: Config) {
   ctx.command(`${commandName} <text:text>`, '手动触发 Agent 网关')
     .action(async ({ session }, text) => {
       if (!text?.trim()) return '请输入内容。'
-      const messages = await runGateway(ctx, session, text, config, config.commandBypassSilence, true, false)
-      if (!messages.length) return 'Agent 未返回可发送内容。'
-      for (const message of messages) {
+      const result = await runGateway(ctx, session, text, config, config.commandBypassSilence, true, false)
+      if (!result.messages.length) return ''
+      for (const message of result.messages) {
         await session.send(message)
       }
       return ''
