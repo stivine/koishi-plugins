@@ -86,8 +86,15 @@ function normalizeText(input: string) {
 }
 
 function shouldTrigger(session: Session, config: Config) {
-  const isPrivate = session.subtype === 'private' || !session.guildId
-  const appel = Boolean((session as any).stripped?.appel)
+  // 不依赖 guildId，避免部分适配器把群聊误判成私聊。
+  const isPrivate = session.subtype === 'private'
+  // 各适配器字段不一致，做更宽松的 @机器人 检测。
+  const appel = Boolean(
+    (session as any).stripped?.appel
+    || (session as any).stripped?.hasAt
+    || (session as any).parsed?.appel
+    || (session as any).parsed?.hasAt
+  )
 
   if (config.triggerMode === 'always') return true
   if (config.triggerMode === 'private-only') return isPrivate
@@ -96,6 +103,11 @@ function shouldTrigger(session: Session, config: Config) {
 
 function isLikelyCommand(content: string) {
   return /^([/.#]|agent\.)/.test(content.trim())
+}
+
+function isGroupMessage(session: Session) {
+  // 某些适配器群消息可能不提供 guildId，不能只靠 guildId 判断。
+  return session.subtype !== 'private' && Boolean(session.channelId)
 }
 
 function makeTraceId(session: Session) {
@@ -249,11 +261,13 @@ export function apply(ctx: Context, config: Config) {
     if (!session.platform) return next()
     if (session.userId === session.selfId || session.author?.isBot) return next()
     const autoTriggered = shouldTrigger(session, config)
+    const captureGroupContext = config.captureGroupContext !== false
     if (!autoTriggered) {
-      const isGroup = !!session.guildId && session.subtype !== 'private'
-      if (config.captureGroupContext && isGroup) {
+      const isGroup = isGroupMessage(session)
+      if (captureGroupContext && isGroup) {
         const text = normalizeText(session.content)
         if (text && !isLikelyCommand(text)) {
+          logger.debug(`observeOnly capture: channel=${session.channelId || 'unknown'} user=${session.userId || 'unknown'}`)
           await runGateway(ctx, session, text, config, true, false, true)
         }
       }
