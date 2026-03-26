@@ -52,6 +52,7 @@ export interface Config {
   endpoint: string
   apiKey?: string
   timeout: number
+  replyProbability: number
   enabledGroupIds: string[]
   triggerMode: 'mention-or-private' | 'always' | 'private-only'
   captureGroupContext: boolean
@@ -66,6 +67,7 @@ export const Config: Schema<Config> = Schema.object({
   endpoint: Schema.string().required().description('Agent 服务接口地址，例如 http://127.0.0.1:8000/chat'),
   apiKey: Schema.string().role('secret').description('可选：Agent 服务鉴权 key。'),
   timeout: Schema.number().default(Time.second * 20).description('请求 Agent 的超时毫秒数。'),
+  replyProbability: Schema.number().min(0).max(0.2).step(0.01).default(0.1).description('非强制触发时的回复概率 p（0~0.2）。'),
   enabledGroupIds: Schema.array(String).default([]).description('可选：仅这些群号启用网关处理；留空表示所有群都启用。'),
   triggerMode: Schema.union([
     Schema.const('mention-or-private').description('仅在 @机器人 或私聊时自动触发。'),
@@ -97,6 +99,15 @@ function shortText(text: string, max = 80) {
   return `${s.slice(0, max)}...`
 }
 
+function hasAppel(session: Session) {
+  return Boolean(
+    (session as any).stripped?.appel
+    || (session as any).stripped?.hasAt
+    || (session as any).parsed?.appel
+    || (session as any).parsed?.hasAt
+  )
+}
+
 function isPrivateSession(session: Session) {
   const channelId = String(session.channelId || '')
   return session.subtype === 'private'
@@ -108,12 +119,7 @@ function shouldTrigger(session: Session, config: Config) {
   // 不依赖单一字段，兼容 sandbox / 多适配器。
   const isPrivate = isPrivateSession(session)
   // 各适配器字段不一致，做更宽松的 @机器人 检测。
-  const appel = Boolean(
-    (session as any).stripped?.appel
-    || (session as any).stripped?.hasAt
-    || (session as any).parsed?.appel
-    || (session as any).parsed?.hasAt
-  )
+  const appel = hasAppel(session)
 
   let triggered = false
   if (config.triggerMode === 'always') triggered = true
@@ -258,11 +264,14 @@ async function runGateway(
   observeOnly = false,
 ) {
   const traceId = makeTraceId(session)
+  const replyProbability = Math.min(Math.max(Number(config.replyProbability ?? 0.1), 0), 0.2)
   const body = buildRequestBody(session, text, traceId, config)
   body.metadata = {
     ...(body.metadata || {}),
     manual,
     observeOnly,
+    mentioned: hasAppel(session),
+    replyProbability,
   }
   logger.info(
     `gateway dispatch: traceId=${traceId} manual=${manual} observeOnly=${observeOnly} bypassStop=${bypassStop} endpoint=${config.endpoint} sessionKey=${body.sessionKey} text="${shortText(text)}" ${sessionMeta(session)}`
