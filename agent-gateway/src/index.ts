@@ -85,9 +85,22 @@ function normalizeText(input: string) {
     .trim()
 }
 
+function sessionMeta(session: Session) {
+  return `platform=${session.platform || 'unknown'} channel=${session.channelId || 'private'} guild=${session.guildId || 'none'} user=${session.userId || 'unknown'} subtype=${session.subtype || 'unknown'}`
+}
+
+function shortText(text: string, max = 80) {
+  const s = normalizeText(text)
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}...`
+}
+
 function shouldTrigger(session: Session, config: Config) {
-  // 不依赖 guildId，避免部分适配器把群聊误判成私聊。
+  // 不依赖单一字段，兼容 sandbox / 多适配器。
+  const channelId = String(session.channelId || '')
   const isPrivate = session.subtype === 'private'
+    || Boolean((session as any).isDirect)
+    || channelId.startsWith('@')
   // 各适配器字段不一致，做更宽松的 @机器人 检测。
   const appel = Boolean(
     (session as any).stripped?.appel
@@ -96,9 +109,13 @@ function shouldTrigger(session: Session, config: Config) {
     || (session as any).parsed?.hasAt
   )
 
-  if (config.triggerMode === 'always') return true
-  if (config.triggerMode === 'private-only') return isPrivate
-  return isPrivate || appel
+  let triggered = false
+  if (config.triggerMode === 'always') triggered = true
+  else if (config.triggerMode === 'private-only') triggered = isPrivate
+  else triggered = isPrivate || appel
+
+  logger.info(`trigger check: mode=${config.triggerMode} isPrivate=${isPrivate} appel=${appel} triggered=${triggered} ${sessionMeta(session)}`)
+  return triggered
 }
 
 function isLikelyCommand(content: string) {
@@ -234,6 +251,9 @@ async function runGateway(
     manual,
     observeOnly,
   }
+  logger.info(
+    `gateway dispatch: traceId=${traceId} manual=${manual} observeOnly=${observeOnly} bypassStop=${bypassStop} endpoint=${config.endpoint} sessionKey=${body.sessionKey} text="${shortText(text)}" ${sessionMeta(session)}`
+  )
 
   let data: AgentResponseBody
   try {
@@ -246,6 +266,9 @@ async function runGateway(
   }
 
   const parsed = responseToMessages(data, bypassStop)
+  // logger.info(
+  //   `gateway response: traceId=${traceId} actionCount=${Array.isArray(data.actions) ? data.actions.length : 0} segmentCount=${Array.isArray(data.segments) ? data.segments.length : 0} hasReply=${Boolean(data.reply)} parsedMessages=${parsed.messages.length} stopped=${parsed.stopped}`
+  // )
   if (!parsed.messages.length && !parsed.stopped) {
     const raw = normalizeText(JSON.stringify(data)).slice(0, 700)
     const detail = `traceId=${traceId} reason=empty_response body=${raw || '{}'}`.slice(0, 1000)
@@ -256,32 +279,60 @@ async function runGateway(
 }
 
 export function apply(ctx: Context, config: Config) {
+  // logger.info(
+  //   `plugin enabled: endpoint=${config.endpoint} timeout=${config.timeout} triggerMode=${config.triggerMode} captureGroupContext=${config.captureGroupContext !== false} commandName=${config.commandName || 'agent.chat'} commandBypassSilence=${config.commandBypassSilence} passthroughMetadata=${config.passthroughMetadata}`
+  // )
   ctx.middleware(async (session, next) => {
-    if (session.type !== 'message') return next()
-    if (!session.platform) return next()
-    if (session.userId === session.selfId || session.author?.isBot) return next()
+    // logger.info(`middleware in: type=${session.type || 'unknown'} content="${shortText(session.content || '')}" ${sessionMeta(session)}`)
+    const eventType = String(session.type || '')
+    const isMessageEvent = eventType === 'message' || eventType.startsWith('message-')
+    if (!isMessageEvent) {
+      logger.info(`skip: non-message event, type=${session.type || 'unknown'}`)
+      return next()
+    }
+    if (!session.platform) {
+      logger.warn(`skip: missing platform, ${sessionMeta(session)}`)
+      return next()
+    }
+    if (session.userId === session.selfId || session.author?.isBot) {
+      // logger.debug(`skip: bot/self message, ${sessionMeta(session)}`)
+      return next()
+    }
     const autoTriggered = shouldTrigger(session, config)
     const captureGroupContext = config.captureGroupContext !== false
     if (!autoTriggered) {
       const isGroup = isGroupMessage(session)
+      // logger.info(`auto trigger off: isGroup=${isGroup} captureGroupContext=${captureGroupContext} ${sessionMeta(session)}`)
       if (captureGroupContext && isGroup) {
         const text = normalizeText(session.content)
         if (text && !isLikelyCommand(text)) {
           logger.debug(`observeOnly capture: channel=${session.channelId || 'unknown'} user=${session.userId || 'unknown'}`)
           await runGateway(ctx, session, text, config, true, false, true)
+        } else {
+          logger.debug(`observeOnly skip: emptyTextOrCommand text="${shortText(text)}"`)
         }
       }
       return next()
     }
 
     const text = normalizeText(session.content)
-    if (!text) return next()
-    if (isLikelyCommand(text)) return next()
+    if (!text) {
+      logger.info(`auto trigger skip: empty normalized text ${sessionMeta(session)}`)
+      return next()
+    }
+    if (isLikelyCommand(text)) {
+      logger.info(`auto trigger skip: detected command text="${shortText(text)}"`)
+      return next()
+    }
 
     const result = await runGateway(ctx, session, text, config, false, false, false)
-    if (!result.messages.length) return next()
+    if (!result.messages.length) {
+      logger.info(`auto trigger no output: stopped=${result.stopped} ${sessionMeta(session)}`)
+      return next()
+    }
 
     for (const message of result.messages) {
+      logger.info(`auto send: message="${shortText(message)}" ${sessionMeta(session)}`)
       await session.send(message)
     }
   })
@@ -290,9 +341,11 @@ export function apply(ctx: Context, config: Config) {
   ctx.command(`${commandName} <text:text>`, '手动触发 Agent 网关')
     .action(async ({ session }, text) => {
       if (!text?.trim()) return '请输入内容。'
+      logger.info(`manual command invoke: command=${commandName} text="${shortText(text)}" ${sessionMeta(session)}`)
       const result = await runGateway(ctx, session, text, config, config.commandBypassSilence, true, false)
       if (!result.messages.length) return ''
       for (const message of result.messages) {
+        logger.info(`manual send: message="${shortText(message)}" ${sessionMeta(session)}`)
         await session.send(message)
       }
       return ''
