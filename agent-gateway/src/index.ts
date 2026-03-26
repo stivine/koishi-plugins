@@ -52,6 +52,7 @@ export interface Config {
   endpoint: string
   apiKey?: string
   timeout: number
+  enabledGroupIds: string[]
   triggerMode: 'mention-or-private' | 'always' | 'private-only'
   captureGroupContext: boolean
   commandName: string
@@ -65,6 +66,7 @@ export const Config: Schema<Config> = Schema.object({
   endpoint: Schema.string().required().description('Agent 服务接口地址，例如 http://127.0.0.1:8000/chat'),
   apiKey: Schema.string().role('secret').description('可选：Agent 服务鉴权 key。'),
   timeout: Schema.number().default(Time.second * 20).description('请求 Agent 的超时毫秒数。'),
+  enabledGroupIds: Schema.array(String).default([]).description('可选：仅这些群号启用网关处理；留空表示所有群都启用。'),
   triggerMode: Schema.union([
     Schema.const('mention-or-private').description('仅在 @机器人 或私聊时自动触发。'),
     Schema.const('always').description('所有消息都触发。'),
@@ -95,12 +97,16 @@ function shortText(text: string, max = 80) {
   return `${s.slice(0, max)}...`
 }
 
-function shouldTrigger(session: Session, config: Config) {
-  // 不依赖单一字段，兼容 sandbox / 多适配器。
+function isPrivateSession(session: Session) {
   const channelId = String(session.channelId || '')
-  const isPrivate = session.subtype === 'private'
+  return session.subtype === 'private'
     || Boolean((session as any).isDirect)
     || channelId.startsWith('@')
+}
+
+function shouldTrigger(session: Session, config: Config) {
+  // 不依赖单一字段，兼容 sandbox / 多适配器。
+  const isPrivate = isPrivateSession(session)
   // 各适配器字段不一致，做更宽松的 @机器人 检测。
   const appel = Boolean(
     (session as any).stripped?.appel
@@ -124,7 +130,14 @@ function isLikelyCommand(content: string) {
 
 function isGroupMessage(session: Session) {
   // 某些适配器群消息可能不提供 guildId，不能只靠 guildId 判断。
-  return session.subtype !== 'private' && Boolean(session.channelId)
+  return !isPrivateSession(session) && Boolean(session.channelId)
+}
+
+function isGroupEnabled(session: Session, config: Config) {
+  if (!isGroupMessage(session)) return true
+  const allowed = (config.enabledGroupIds || []).map((x) => String(x || '').trim()).filter(Boolean)
+  if (!allowed.length) return true
+  return allowed.includes(String(session.channelId || '').trim())
 }
 
 function makeTraceId(session: Session) {
@@ -139,7 +152,7 @@ function buildSessionKey(session: Session) {
 }
 
 function buildRequestBody(session: Session, text: string, traceId: string, config: Config): AgentRequestBody {
-  const isDirect = session.subtype === 'private' || !session.guildId
+  const isDirect = isPrivateSession(session)
 
   return {
     traceId,
@@ -298,6 +311,11 @@ export function apply(ctx: Context, config: Config) {
       // logger.debug(`skip: bot/self message, ${sessionMeta(session)}`)
       return next()
     }
+    if (!isGroupEnabled(session, config)) {
+      logger.debug(`skip: group not enabled, channel=${session.channelId || 'unknown'} enabledGroups=${(config.enabledGroupIds || []).join(',') || '(all)'}`)
+      return next()
+    }
+
     const autoTriggered = shouldTrigger(session, config)
     const captureGroupContext = config.captureGroupContext !== false
     if (!autoTriggered) {
@@ -341,6 +359,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.command(`${commandName} <text:text>`, '手动触发 Agent 网关')
     .action(async ({ session }, text) => {
       if (!text?.trim()) return '请输入内容。'
+      if (!isGroupEnabled(session, config)) return '当前群未启用 Agent 网关。'
       logger.info(`manual command invoke: command=${commandName} text="${shortText(text)}" ${sessionMeta(session)}`)
       const result = await runGateway(ctx, session, text, config, config.commandBypassSilence, true, false)
       if (!result.messages.length) return ''
