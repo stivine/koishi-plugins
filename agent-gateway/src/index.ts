@@ -99,6 +99,10 @@ function shortText(text: string, max = 80) {
   return `${s.slice(0, max)}...`
 }
 
+function hasNameMention(content: string) {
+  return normalizeText(content).includes('白槿')
+}
+
 function hasAppel(session: Session) {
   return Boolean(
     (session as any).stripped?.appel
@@ -120,13 +124,14 @@ function shouldTrigger(session: Session, config: Config) {
   const isPrivate = isPrivateSession(session)
   // 各适配器字段不一致，做更宽松的 @机器人 检测。
   const appel = hasAppel(session)
+  const nameMention = hasNameMention(session.content || '')
 
   let triggered = false
   if (config.triggerMode === 'always') triggered = true
   else if (config.triggerMode === 'private-only') triggered = isPrivate
-  else triggered = isPrivate || appel
+  else triggered = isPrivate || appel || nameMention
 
-  logger.info(`trigger check: mode=${config.triggerMode} isPrivate=${isPrivate} appel=${appel} triggered=${triggered} ${sessionMeta(session)}`)
+  logger.info(`trigger check: mode=${config.triggerMode} isPrivate=${isPrivate} appel=${appel} nameMention=${nameMention} triggered=${triggered} ${sessionMeta(session)}`)
   return triggered
 }
 
