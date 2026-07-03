@@ -1,4 +1,4 @@
-import { Context, Logger, Schema, Session, Time } from 'koishi'
+import { Context, h, Logger, Schema, Session, Time } from 'koishi'
 
 const logger = new Logger('agent-gateway')
 
@@ -14,6 +14,7 @@ export interface AgentRequestBody {
     id?: string
     content: string
     quote?: string
+    images?: AgentImagePayload[]
   }
   user: {
     id?: string
@@ -29,6 +30,13 @@ export interface AgentRequestBody {
     selfId?: string
   }
   metadata?: Record<string, unknown>
+}
+
+export interface AgentImagePayload {
+  url?: string
+  file?: string
+  mime?: string
+  name?: string
 }
 
 export interface AgentReplyAction {
@@ -87,6 +95,30 @@ function normalizeText(input: string) {
     .replace(/<[^>]*>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function extractImages(input: string): AgentImagePayload[] {
+  const images: AgentImagePayload[] = []
+  try {
+    for (const element of h.parse(String(input || ''))) {
+      if (element.type !== 'img' && element.type !== 'image') continue
+      const attrs = element.attrs || {}
+      const url = String(attrs.url || attrs.src || attrs.href || '').trim()
+      const file = String(attrs.file || attrs.path || '').trim()
+      const mime = String(attrs.mime || attrs.type || '').trim()
+      const name = String(attrs.name || attrs.filename || '').trim()
+      if (!url && !file) continue
+      images.push({
+        ...(url ? { url } : {}),
+        ...(file ? { file } : {}),
+        ...(mime ? { mime } : {}),
+        ...(name ? { name } : {}),
+      })
+    }
+  } catch (error) {
+    logger.warn(`image parse failed: ${toErrorMessage(error)}`)
+  }
+  return images.slice(0, 3)
 }
 
 function sessionMeta(session: Session) {
@@ -164,6 +196,7 @@ function buildSessionKey(session: Session) {
 
 function buildRequestBody(session: Session, text: string, traceId: string, config: Config): AgentRequestBody {
   const isDirect = isPrivateSession(session)
+  const images = extractImages(session.content || '')
 
   return {
     traceId,
@@ -174,6 +207,7 @@ function buildRequestBody(session: Session, text: string, traceId: string, confi
       id: session.messageId,
       content: text,
       quote: session.quote?.content,
+      images,
     },
     user: {
       id: session.userId,
@@ -279,7 +313,7 @@ async function runGateway(
     replyProbability,
   }
   logger.info(
-    `gateway dispatch: traceId=${traceId} manual=${manual} observeOnly=${observeOnly} bypassStop=${bypassStop} endpoint=${config.endpoint} sessionKey=${body.sessionKey} text="${shortText(text)}" ${sessionMeta(session)}`
+    `gateway dispatch: traceId=${traceId} manual=${manual} observeOnly=${observeOnly} bypassStop=${bypassStop} imageCount=${body.message.images?.length || 0} endpoint=${config.endpoint} sessionKey=${body.sessionKey} text="${shortText(text)}" ${sessionMeta(session)}`
   )
 
   let data: AgentResponseBody
@@ -337,7 +371,8 @@ export function apply(ctx: Context, config: Config) {
       // logger.info(`auto trigger off: isGroup=${isGroup} captureGroupContext=${captureGroupContext} ${sessionMeta(session)}`)
       if (captureGroupContext && isGroup) {
         const text = normalizeText(session.content)
-        if (text && !isLikelyCommand(text)) {
+        const images = extractImages(session.content || '')
+        if ((text || images.length) && !isLikelyCommand(text)) {
           logger.debug(`observeOnly capture: channel=${session.channelId || 'unknown'} user=${session.userId || 'unknown'}`)
           await runGateway(ctx, session, text, config, true, false, true)
         } else {
@@ -348,7 +383,8 @@ export function apply(ctx: Context, config: Config) {
     }
 
     const text = normalizeText(session.content)
-    if (!text) {
+    const images = extractImages(session.content || '')
+    if (!text && !images.length) {
       logger.info(`auto trigger skip: empty normalized text ${sessionMeta(session)}`)
       return next()
     }

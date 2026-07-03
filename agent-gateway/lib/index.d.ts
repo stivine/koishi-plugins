@@ -10,6 +10,7 @@ export interface AgentRequestBody {
         id?: string;
         content: string;
         quote?: string;
+        images?: AgentImagePayload[];
     };
     user: {
         id?: string;
@@ -25,6 +26,12 @@ export interface AgentRequestBody {
         selfId?: string;
     };
     metadata?: Record<string, unknown>;
+}
+export interface AgentImagePayload {
+    url?: string;
+    file?: string;
+    mime?: string;
+    name?: string;
 }
 export interface AgentReplyAction {
     type: 'reply';
@@ -43,6 +50,8 @@ export interface Config {
     endpoint: string;
     apiKey?: string;
     timeout: number;
+    replyProbability: number;
+    enabledGroupIds: string[];
     triggerMode: 'mention-or-private' | 'always' | 'private-only';
     captureGroupContext: boolean;
     commandName: string;

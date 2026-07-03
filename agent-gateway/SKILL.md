@@ -27,7 +27,14 @@
   "message": {
     "id": "msg-id",
     "content": "今天有点累",
-    "quote": "你还好吗"
+    "quote": "你还好吗",
+    "images": [
+      {
+        "url": "https://example.com/image.jpg",
+        "mime": "image/jpeg",
+        "name": "image.jpg"
+      }
+    ]
   },
   "user": {
     "id": "987654",
@@ -50,6 +57,13 @@
   }
 }
 ```
+
+图片字段说明：
+
+- `message.images` 可选。
+- 网关会从 Koishi 消息元素中的 `img` / `image` 提取 `url/src/href`、`file/path`、`mime/type`、`name/filename`。
+- 单独发图时 `message.content` 可以为空字符串，但 `images` 非空。
+- Agent 服务端应自行决定是否调用多模态模型，并将图片理解结果融入文本上下文或记忆。
 
 ## 响应体（AgentResponseBody）
 
