@@ -14,5 +14,7 @@ export interface IConfig {
     eewBotList: any;
     showEewEmoji: boolean;
     magnitudeThreshold: number;
+    recallPreviousEew: boolean;
+    recallPreviousEewMaxAge: number;
 }
 export declare const SConfig: Schema<Schemastery.ObjectS<{}>, {} & import("cosmokit").Dict>;

@@ -59,7 +59,9 @@ var SConfig = import_koishi.Schema.intersect([
     enabledJmaEew: import_koishi.Schema.boolean().default(false).description("是否启用日本地震预警推送"),
     enabledJmaEqlist: import_koishi.Schema.boolean().default(false).description("是否启用日本地震报告推送（仅解析**No1**消息）"),
     enabledCencEqlist: import_koishi.Schema.boolean().default(false).description("是否启用中国地震台网地震报告推送（仅解析**No1**消息）"),
-    magnitudeThreshold: import_koishi.Schema.number().min(0).max(10).default(0).description("震级阈值（单位：级）")
+    magnitudeThreshold: import_koishi.Schema.number().min(0).max(10).default(0).description("震级阈值（单位：级）"),
+    recallPreviousEew: import_koishi.Schema.boolean().default(true).description("同一信息源的同一地震更新时，发送新消息成功后撤回上一条消息"),
+    recallPreviousEewMaxAge: import_koishi.Schema.number().min(0).default(36e5).description("上一条预警可撤回记录的保留时间（单位：ms，0 表示不按时间清理）")
 
   }).description("推送设置")
 ]);
@@ -127,6 +129,46 @@ function getFormatTime(timestamp) {
   return import_koishi2.Time.template("yyyy-MM-dd hh:mm:ss", new Date(timestamp));
 }
 __name(getFormatTime, "getFormatTime");
+function firstDefined(...values) {
+  return values.find((value) => value != void 0 && value !== "");
+}
+__name(firstDefined, "firstDefined");
+function getEewPayload(data_object) {
+  if (data_object?.type?.includes("eqlist"))
+    return data_object["No1"] ?? data_object;
+  return data_object;
+}
+__name(getEewPayload, "getEewPayload");
+function getEewEventKey(data_object) {
+  const payload = getEewPayload(data_object) ?? {};
+  const source = data_object?.type ?? payload.type ?? "unknown";
+  const eventId = firstDefined(
+    payload.EventID,
+    payload.EventId,
+    payload.eventId,
+    payload.event_id,
+    payload.ReportID,
+    payload.ReportId,
+    payload.reportId,
+    payload.report_id,
+    payload.ID,
+    payload.Id,
+    payload.id,
+    data_object.EventID,
+    data_object.EventId,
+    data_object.eventId,
+    data_object.event_id,
+    data_object.id
+  );
+  if (eventId != void 0)
+    return `${source}:id:${eventId}`;
+  const originTime = firstDefined(payload.OriginTime, payload.time_full, payload.time);
+  const region = firstDefined(payload.HypoCenter, payload.Hypocenter, payload.location);
+  const latitude = firstDefined(payload.Latitude, payload.latitude);
+  const longitude = firstDefined(payload.Longitude, payload.longitude);
+  return `${source}:fallback:${originTime ?? "unknown-time"}:${region ?? "unknown-region"}:${latitude ?? "unknown-lat"}:${longitude ?? "unknown-lon"}`;
+}
+__name(getEewEventKey, "getEewEventKey");
 
 // src/model.ts
 var EewAdapter = class {
@@ -140,6 +182,9 @@ var EewAdapter = class {
   showEewLogs;
   showEewEmoji;
   magnitudeThreshold;
+  recallPreviousEew;
+  recallPreviousEewMaxAge;
+  lastMessages = /* @__PURE__ */ new Map();
   ctx;
   eew_addr;
   eewAllows = {
@@ -150,7 +195,7 @@ var EewAdapter = class {
     "cenc_eqlist": true,
     "jma_eqlist": true
   };
-  constructor(ctx, bot_list, send_list, eew_log, eew_emoji, magnitudeThreshold, eew_addr) {
+  constructor(ctx, bot_list, send_list, eew_log, eew_emoji, magnitudeThreshold, eew_addr, recallPreviousEew = true, recallPreviousEewMaxAge = 36e5) {
     this.ctx = ctx;
     this.botsList = bot_list;
     this.sendList = send_list;
@@ -158,14 +203,64 @@ var EewAdapter = class {
     this.showEewEmoji = eew_emoji;
     this.magnitudeThreshold = magnitudeThreshold;
     this.eew_addr = eew_addr;
+    this.recallPreviousEew = recallPreviousEew;
+    this.recallPreviousEewMaxAge = recallPreviousEewMaxAge;
   }
-  async sendMessageToFriend(user_id, message) {
-    for (var bot of this.getSenderBotList())
-      await bot.sendPrivateMessage(user_id, message);
+  getMessageRecordKey(eventKey, bot, target, targetId) {
+    return `${eventKey}:${bot["user"]?.id ?? bot.selfId ?? "unknown-bot"}:${target}:${targetId}`;
   }
-  async sendMessageToGroup(guild_id, message) {
+  async recallPreviousMessage(recordKey) {
+    if (!this.recallPreviousEew)
+      return;
+    const record = this.lastMessages.get(recordKey);
+    if (record == void 0)
+      return;
+    this.lastMessages.delete(recordKey);
+    for (var messageId of record.messageIds) {
+      try {
+        await record.bot.deleteMessage(record.channelId, messageId);
+      } catch (error) {
+        custLog(this.ctx, "warn", `撤回上一条地震预警失败：${record.target} ${record.targetId} ${messageId} ${error}`);
+      }
+    }
+  }
+  rememberMessage(recordKey, bot, target, targetId, channelId, messageIds) {
+    if (!this.recallPreviousEew || messageIds == void 0 || messageIds.length == 0)
+      return;
+    this.lastMessages.set(recordKey, {
+      bot,
+      target,
+      targetId,
+      channelId,
+      messageIds,
+      sentAt: Date.now()
+    });
+    this.cleanupLastMessages();
+  }
+  cleanupLastMessages() {
+    if (!this.recallPreviousEewMaxAge || this.recallPreviousEewMaxAge <= 0)
+      return;
+    const expireBefore = Date.now() - this.recallPreviousEewMaxAge;
+    for (var [key, record] of this.lastMessages) {
+      if (record.sentAt < expireBefore)
+        this.lastMessages.delete(key);
+    }
+  }
+  async sendMessageToFriend(user_id, message, eventKey) {
     for (var bot of this.getSenderBotList()) {
-      await bot.sendMessage(guild_id, message);
+      const channel = await bot.createDirectChannel(user_id);
+      const recordKey = this.getMessageRecordKey(eventKey, bot, "Friend", user_id);
+      const messageIds = await bot.sendMessage(channel.id, message);
+      await this.recallPreviousMessage(recordKey);
+      this.rememberMessage(recordKey, bot, "Friend", user_id, channel.id, messageIds);
+    }
+  }
+  async sendMessageToGroup(guild_id, message, eventKey) {
+    for (var bot of this.getSenderBotList()) {
+      const recordKey = this.getMessageRecordKey(eventKey, bot, "Group", guild_id);
+      const messageIds = await bot.sendMessage(guild_id, message);
+      await this.recallPreviousMessage(recordKey);
+      this.rememberMessage(recordKey, bot, "Group", guild_id, guild_id, messageIds);
     }
   }
   async sendEew(data_object) {
@@ -192,6 +287,7 @@ var EewAdapter = class {
         eew = new ScEew(this.ctx);
         break;
     }
+    const eventKey = getEewEventKey(data_object);
     if (data_object.type.includes("eqlist"))
       eew.eewExecute(data_object["No1"]);
     else
@@ -208,10 +304,10 @@ var EewAdapter = class {
       for (var item of this.sendList) {
         switch (item["target"]) {
           case "Friend":
-            await this.sendMessageToFriend(item["id"], result);
+            await this.sendMessageToFriend(item["id"], result, eventKey);
             break;
           case "Group":
-            await this.sendMessageToGroup(item["id"], result);
+            await this.sendMessageToGroup(item["id"], result, eventKey);
             break;
           default:
             break;
@@ -523,10 +619,12 @@ function apply(ctx, config) {
   const JEQLST_SW = config.enabledJmaEqlist ?? false;
   const CEQLST_SW = config.enabledCencEqlist ?? false;
   const M_THRESHOLD = config.magnitudeThreshold ?? 0;
+  const RECALL_PREVIOUS_EEW = config.recallPreviousEew ?? true;
+  const RECALL_PREVIOUS_EEW_MAX_AGE = config.recallPreviousEewMaxAge ?? 36e5;
   var eewAdaper;
   ctx.on("ready", () => {
     if (eewAdaper == void 0) {
-      eewAdaper = new EewAdapter(ctx, EEW_BOTLIST, EEW_SENDLIST, SHOW_EEWLOG, SHOW_EEWEMOJE, M_THRESHOLD, EEW_ADDR);
+      eewAdaper = new EewAdapter(ctx, EEW_BOTLIST, EEW_SENDLIST, SHOW_EEWLOG, SHOW_EEWEMOJE, M_THRESHOLD, EEW_ADDR, RECALL_PREVIOUS_EEW, RECALL_PREVIOUS_EEW_MAX_AGE);
       eewAdaper.setEewSwAllows(SC_SW, FJ_SW, CMA_SW, JMA_SW, JEQLST_SW, CEQLST_SW, M_THRESHOLD);
     }
     custLog(ctx, "success", "plugin ready");
@@ -584,7 +682,7 @@ function apply(ctx, config) {
       eewAdaper.stop();
     } catch {
     }
-    eewAdaper = new EewAdapter(ctx, EEW_BOTLIST, EEW_SENDLIST, SHOW_EEWLOG, SHOW_EEWEMOJE);
+    eewAdaper = new EewAdapter(ctx, EEW_BOTLIST, EEW_SENDLIST, SHOW_EEWLOG, SHOW_EEWEMOJE, M_THRESHOLD, EEW_ADDR, RECALL_PREVIOUS_EEW, RECALL_PREVIOUS_EEW_MAX_AGE);
     eewAdaper.setEewSwAllows(SC_SW, FJ_SW, CMA_SW, JMA_SW, JEQLST_SW, CEQLST_SW, M_THRESHOLD);
     custLog(ctx, "success", "ws reset");
     return "地震预警重置成功";

@@ -5,11 +5,20 @@ export declare class EewAdapter {
     private botsList;
     private showEewLogs;
     private showEewEmoji;
+    private magnitudeThreshold;
+    private recallPreviousEew;
+    private recallPreviousEewMaxAge;
+    private lastMessages;
     private ctx;
+    private eew_addr;
     private eewAllows;
-    constructor(ctx: Context, bot_list: string[], send_list: any[], eew_log: boolean, eew_emoji: boolean);
-    sendMessageToFriend(user_id: string, message: string): Promise<void>;
-    sendMessageToGroup(guild_id: string, message: string): Promise<void>;
+    constructor(ctx: Context, bot_list: string[], send_list: any[], eew_log: boolean, eew_emoji: boolean, magnitudeThreshold: number, eew_addr: string, recallPreviousEew?: boolean, recallPreviousEewMaxAge?: number);
+    getMessageRecordKey(eventKey: string, bot: Bot, target: string, targetId: string): string;
+    recallPreviousMessage(recordKey: string): Promise<void>;
+    rememberMessage(recordKey: string, bot: Bot, target: string, targetId: string, channelId: string, messageIds: string[]): void;
+    cleanupLastMessages(): void;
+    sendMessageToFriend(user_id: string, message: string, eventKey: string): Promise<void>;
+    sendMessageToGroup(guild_id: string, message: string, eventKey: string): Promise<void>;
     sendEew(data_object: any): Promise<void>;
     getSenderBotList(): Bot[];
     setup(ws_url: string, time_out: number): void;
@@ -20,7 +29,7 @@ export declare class EewAdapter {
     isEnable(): boolean;
     status(show_emoji?: boolean): string;
     info(show_emoji?: boolean): string;
-    setEewSwAllows(sc_eew_sw: boolean, fj_eew_sw: boolean, cwa_eew_sw: boolean, jma_eew_sw: boolean, jma_eqlist_sw: boolean, cenc_eqlist_sw: boolean): void;
+    setEewSwAllows(sc_eew_sw: boolean, fj_eew_sw: boolean, cwa_eew_sw: boolean, jma_eew_sw: boolean, jma_eqlist_sw: boolean, cenc_eqlist_sw: boolean, magnitudeThreshold: number): void;
     test2(): Promise<void>;
 }
 export declare class Eew {
