@@ -37,6 +37,10 @@ export interface AgentImagePayload {
   file?: string
   mime?: string
   name?: string
+  summary?: string
+  subType?: number | string
+  fileSize?: number | string
+  kind?: 'image' | 'sticker'
 }
 
 export interface AgentReplyAction {
@@ -48,7 +52,14 @@ export interface AgentStopAction {
   type: 'stop'
 }
 
-export type AgentAction = AgentReplyAction | AgentStopAction
+export interface AgentImageAction {
+  type: 'image'
+  url?: string
+  file?: string
+  sticker_id?: number
+}
+
+export type AgentAction = AgentReplyAction | AgentImageAction | AgentStopAction
 
 export interface AgentResponseBody {
   actions?: AgentAction[]
@@ -67,6 +78,7 @@ export interface Config {
   commandName: string
   commandBypassSilence: boolean
   passthroughMetadata: boolean
+  debugMessagePayload: boolean
   adminNotifyUserId?: string
   adminNotifyPlatform?: string
 }
@@ -86,6 +98,7 @@ export const Config: Schema<Config> = Schema.object({
   commandName: Schema.string().default('agent.chat').description('手动触发命令名。'),
   commandBypassSilence: Schema.boolean().default(true).description('手动命令是否绕过 Agent 的 stop 行为。'),
   passthroughMetadata: Schema.boolean().default(true).description('是否将 session 额外字段透传给 Agent。'),
+  debugMessagePayload: Schema.boolean().default(false).description('调试：打印 Koishi 消息元素和事件字段，用于识别 NapCat 图片/表情包差异。'),
   adminNotifyUserId: Schema.string().description('可选：Agent 异常时通知的管理员用户 ID，不填则不通知。'),
   adminNotifyPlatform: Schema.string().description('可选：管理员所在平台（如 onebot），不填则使用当前会话平台。'),
 })
@@ -97,28 +110,116 @@ function normalizeText(input: string) {
     .trim()
 }
 
-function extractImages(input: string): AgentImagePayload[] {
+function imageKind(summary: string, subType: unknown): 'image' | 'sticker' {
+  if (String(summary || '').includes('表情')) return 'sticker'
+  if (String(subType ?? '') === '1') return 'sticker'
+  return 'image'
+}
+
+function extractImages(session: Session): AgentImagePayload[] {
   const images: AgentImagePayload[] = []
+  const onebotImages = Array.isArray((session as any).onebot?.message)
+    ? (session as any).onebot.message.filter((item: any) => item?.type === 'image')
+    : []
   try {
-    for (const element of h.parse(String(input || ''))) {
+    let index = 0
+    for (const element of h.parse(String(session.content || ''))) {
       if (element.type !== 'img' && element.type !== 'image') continue
       const attrs = element.attrs || {}
+      const raw = onebotImages[index]?.data || {}
+      index += 1
       const url = String(attrs.url || attrs.src || attrs.href || '').trim()
       const file = String(attrs.file || attrs.path || '').trim()
       const mime = String(attrs.mime || attrs.type || '').trim()
       const name = String(attrs.name || attrs.filename || '').trim()
+      const summary = String(attrs.summary ?? raw.summary ?? '').trim()
+      const subType = attrs.sub_type ?? attrs.subType ?? raw.sub_type
+      const fileSize = attrs.file_size ?? attrs.fileSize ?? raw.file_size
       if (!url && !file) continue
       images.push({
         ...(url ? { url } : {}),
         ...(file ? { file } : {}),
         ...(mime ? { mime } : {}),
         ...(name ? { name } : {}),
+        ...(summary ? { summary } : {}),
+        ...(subType !== undefined ? { subType } : {}),
+        ...(fileSize !== undefined ? { fileSize } : {}),
+        kind: imageKind(summary, subType),
       })
     }
   } catch (error) {
     logger.warn(`image parse failed: ${toErrorMessage(error)}`)
   }
   return images.slice(0, 3)
+}
+
+function parseElementsForDebug(input: string) {
+  try {
+    return h.parse(String(input || '')).map((element) => ({
+      type: element.type,
+      attrs: element.attrs || {},
+      children: element.children?.map((child) => ({ type: child.type, attrs: child.attrs || {} })),
+    }))
+  } catch (error) {
+    return { error: toErrorMessage(error) }
+  }
+}
+
+function compactJson(value: unknown, max = 6000) {
+  const seen = new WeakSet<object>()
+  const json = JSON.stringify(value, (key, raw) => {
+    if (/token|secret|password|authorization|apiKey/i.test(key)) return '[redacted]'
+    if (typeof raw === 'function') return undefined
+    if (typeof raw === 'string') return raw.length > 800 ? `${raw.slice(0, 800)}...` : raw
+    if (raw && typeof raw === 'object') {
+      if (seen.has(raw)) return '[circular]'
+      seen.add(raw)
+    }
+    return raw
+  })
+  return json.length > max ? `${json.slice(0, max)}...` : json
+}
+
+function debugMessagePayload(session: Session, config: Config) {
+  if (!config.debugMessagePayload) return
+  const eventMessage = (session as any).event?.message
+  const onebot = (session as any).onebot
+  const onebotPayload = onebot
+    ? {
+        post_type: onebot.post_type,
+        message_type: onebot.message_type,
+        sub_type: onebot.sub_type,
+        message_id: onebot.message_id,
+        raw_message: onebot.raw_message,
+        message: onebot.message,
+      }
+    : undefined
+  logger.info(`debug message payload: ${compactJson({
+    meta: {
+      type: session.type,
+      subtype: session.subtype,
+      subsubtype: (session as any).subsubtype,
+      platform: session.platform,
+      channelId: session.channelId,
+      guildId: session.guildId,
+      userId: session.userId,
+      messageId: session.messageId,
+    },
+    content: session.content,
+    parsedElements: parseElementsForDebug(session.content || ''),
+    eventMessage: eventMessage
+      ? {
+          id: eventMessage.id,
+          content: eventMessage.content,
+          elements: eventMessage.elements?.map((element: any) => ({
+            type: element.type,
+            attrs: element.attrs || {},
+            children: element.children?.map((child: any) => ({ type: child.type, attrs: child.attrs || {} })),
+          })),
+        }
+      : undefined,
+    onebot: onebotPayload,
+  })}`)
 }
 
 function sessionMeta(session: Session) {
@@ -196,7 +297,7 @@ function buildSessionKey(session: Session) {
 
 function buildRequestBody(session: Session, text: string, traceId: string, config: Config): AgentRequestBody {
   const isDirect = isPrivateSession(session)
-  const images = extractImages(session.content || '')
+  const images = extractImages(session)
 
   return {
     traceId,
@@ -245,6 +346,13 @@ function responseToMessages(data: AgentResponseBody, bypassStop = false) {
       if (action.type === 'reply') {
         const msg = normalizeText(action.content)
         if (msg) messages.push(msg)
+      }
+      if (action.type === 'image') {
+        const src = String(action.url || action.file || '').trim()
+        if (src) {
+          logger.info(`gateway image action: sticker_id=${action.sticker_id || 'none'} src="${shortText(src, 160)}"`)
+          messages.push(h.image(src).toString())
+        }
       }
     }
     return { messages, stopped }
@@ -363,6 +471,7 @@ export function apply(ctx: Context, config: Config) {
       logger.debug(`skip: group not enabled, channel=${session.channelId || 'unknown'} enabledGroups=${(config.enabledGroupIds || []).join(',') || '(all)'}`)
       return next()
     }
+    debugMessagePayload(session, config)
 
     const autoTriggered = shouldTrigger(session, config)
     const captureGroupContext = config.captureGroupContext !== false
@@ -371,7 +480,7 @@ export function apply(ctx: Context, config: Config) {
       // logger.info(`auto trigger off: isGroup=${isGroup} captureGroupContext=${captureGroupContext} ${sessionMeta(session)}`)
       if (captureGroupContext && isGroup) {
         const text = normalizeText(session.content)
-        const images = extractImages(session.content || '')
+        const images = extractImages(session)
         if ((text || images.length) && !isLikelyCommand(text)) {
           logger.debug(`observeOnly capture: channel=${session.channelId || 'unknown'} user=${session.userId || 'unknown'}`)
           await runGateway(ctx, session, text, config, true, false, true)
@@ -383,7 +492,7 @@ export function apply(ctx: Context, config: Config) {
     }
 
     const text = normalizeText(session.content)
-    const images = extractImages(session.content || '')
+    const images = extractImages(session)
     if (!text && !images.length) {
       logger.info(`auto trigger skip: empty normalized text ${sessionMeta(session)}`)
       return next()
